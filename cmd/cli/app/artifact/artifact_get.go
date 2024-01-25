@@ -94,8 +94,6 @@ func getCommand(ctx context.Context, cmd *cobra.Command, conn *grpc.ClientConn) 
 			tv.AddRow(
 				fmt.Sprintf("%d", version.VersionId),
 				strings.Join(version.Tags, ","),
-				getSignatureStatusText(version.SignatureVerification),
-				version.GetSignatureVerification().GetCertIdentity(),
 				version.CreatedAt.AsTime().Format(time.RFC3339),
 			)
 		}
