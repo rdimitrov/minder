@@ -78,17 +78,20 @@ type Verifier struct {
 func NewVerifier(verifier Type, verifierURL string, containerAuth ...container.AuthMethod) (*Verifier, error) {
 	var err error
 	var v ArtifactVerifier
+
 	// create a temporary directory for storing the sigstore cache
 	tmpDir, err := createTmpDir(LocalCacheDir, "sigstore")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temporary sigstore cache directory: %w", err)
 	}
-	if verifierURL == "" {
-		verifierURL = sigstore.SigstorePublicTrustedRootRepo
-	}
+
 	// create the verifier
 	switch verifier {
 	case VerifierSigstore:
+		// Default the verifier URL to the sigstore public trusted root repo
+		if verifierURL == "" {
+			verifierURL = sigstore.SigstorePublicTrustedRootRepo
+		}
 		v, err = sigstore.New(verifierURL, tmpDir, containerAuth...)
 		if err != nil {
 			return nil, fmt.Errorf("error creating sigstore verifier: %w", err)
@@ -96,6 +99,7 @@ func NewVerifier(verifier Type, verifierURL string, containerAuth ...container.A
 	default:
 		return nil, fmt.Errorf("unknown verifier type: %s", verifier)
 	}
+
 	// return the verifier
 	return &Verifier{
 		verifier: v,

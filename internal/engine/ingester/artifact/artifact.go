@@ -144,7 +144,7 @@ func (i *Ingest) getApplicableArtifactVersions(
 
 		if tagMatcher.MatchTag(artifactVersion.Tags...) {
 			sig, wflow, err := getSignatureAndWorkflowInVersion(
-				ctx, i.ghCli, artifact.Owner, artifact.Name, artifactVersion.PackageVersionName)
+				ctx, i.ghCli, artifact.Owner, artifact.Name, artifactVersion.PackageVersionName, cfg.Sigstore)
 			if err != nil {
 				return nil, err
 			}
@@ -229,11 +229,12 @@ func isProcessable(tags []string) bool {
 func getSignatureAndWorkflowInVersion(
 	ctx context.Context,
 	client provifv1.GitHub,
-	artifactOwnerLogin, artifactName, packageVersionName string,
+	artifactOwnerLogin, artifactName, packageVersionName, sigstoreURL string,
 ) (*pb.SignatureVerification, *pb.GithubWorkflow, error) {
 	// get the verifier for sigstore
 	artifactVerifier, err := verifier.NewVerifier(
 		verifier.VerifierSigstore,
+		sigstoreURL,
 		container.WithAccessToken(client.GetToken()), container.WithGitHubClient(client))
 	if err != nil {
 		return nil, nil, fmt.Errorf("error getting sigstore verifier: %w", err)
