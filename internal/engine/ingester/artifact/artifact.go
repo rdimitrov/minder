@@ -202,6 +202,12 @@ func (i *Ingest) getApplicableArtifactVersions(
 		return nil, err
 	}
 
+	// REMOVE ME
+	prettyJSON, err := json.MarshalIndent(result, "", "    ")
+	if err == nil {
+		fmt.Println(string(prettyJSON))
+	}
+
 	// return the list of applicable artifact versions
 	return result, nil
 }
