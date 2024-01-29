@@ -214,9 +214,9 @@ func getArtifactVersions(ctx context.Context, ghCli provifv1.GitHub, artifact *p
 		tags := version.Metadata.Container.Tags
 		sort.Strings(tags)
 
-		err = IsSkippable(verifier.ArtifactTypeContainer, version.CreatedAt.Time, map[string]interface{}{"tags": tags})
+		err = isSkippable(verifier.ArtifactTypeContainer, version.CreatedAt.Time, map[string]interface{}{"tags": tags})
 		if err != nil {
-			zerolog.Ctx(ctx).Debug().Msg("skipping artifact version")
+			zerolog.Ctx(ctx).Debug().Str("reason", err.Error()).Strs("tags", tags).Msg("skipping artifact version")
 			continue
 		}
 
@@ -263,9 +263,9 @@ var (
 	ArtifactTypeContainerRetentionPeriod = time.Now().AddDate(0, -6, 0)
 )
 
-// IsSkippable determines if an artifact should be skipped
+// isSkippable determines if an artifact should be skipped
 // TODO - this should be refactored as well, for now just a forklift from reconciler
-func IsSkippable(artifactType verifier.ArtifactType, createdAt time.Time, opts map[string]interface{}) error {
+func isSkippable(artifactType verifier.ArtifactType, createdAt time.Time, opts map[string]interface{}) error {
 	switch artifactType {
 	case verifier.ArtifactTypeContainer:
 		// if the artifact is older than the retention period, skip it
