@@ -153,10 +153,6 @@ func (i *Ingest) getApplicableArtifactVersions(
 
 	versionResults := make([]verificationResult, 0, len(versions))
 	for _, artifactVersion := range versions {
-		if !isProcessable(artifactVersion.Tags) {
-			continue
-		}
-
 		if tagMatcher.MatchTag(artifactVersion.Tags...) {
 			res, err := getVerificationResult(
 				ctx, i.ghCli, artifact.Owner, artifact.Name, artifactVersion.Sha, cfg.Sigstore)
@@ -233,20 +229,6 @@ func getArtifactVersions(ctx context.Context, ghCli provifv1.GitHub, artifact *p
 	}
 
 	return pbVersions, nil
-}
-
-func isProcessable(tags []string) bool {
-	if len(tags) == 0 {
-		return false
-	}
-
-	for _, tag := range tags {
-		if tag == "" {
-			return false
-		}
-	}
-
-	return true
 }
 
 func getVerificationResult(
