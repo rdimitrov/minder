@@ -166,7 +166,7 @@ func (i *Ingest) getApplicableArtifactVersions(
 					IsBundleVerified:  res.IsBundleVerified,
 					Repository:        res.Signature.Certificate.SourceRepositoryURI,
 					Branch:            branchFromRef(res.Signature.Certificate.SourceRepositoryRef),
-					WorkflowName:      res.Signature.Certificate.BuildSignerURI,
+					WorkflowName:      workflowFromBuildSignerURI(res.Signature.Certificate.BuildSignerURI),
 					RunnerEnvironment: res.Signature.Certificate.RunnerEnvironment,
 					CertIssuer:        res.Signature.Certificate.Issuer,
 				},
@@ -295,4 +295,26 @@ func branchFromRef(ref string) string {
 	}
 
 	return ""
+}
+
+func workflowFromBuildSignerURI(uri string) string {
+	// Find the index of the start of the ".github/workflows/" part
+	startIndex := strings.Index(uri, ".github/workflows/")
+	if startIndex == -1 {
+		return ""
+	}
+
+	// Adjust startIndex to get the part right after ".github/workflows/"
+	startIndex += len(".github/workflows/")
+
+	// Extract the part after ".github/workflows/"
+	remainingURL := uri[startIndex:]
+
+	// Find the index of '@' to isolate the file name
+	atSymbolIndex := strings.Index(remainingURL, "@")
+	if atSymbolIndex != -1 {
+		return remainingURL[:atSymbolIndex]
+	}
+
+	return remainingURL
 }
