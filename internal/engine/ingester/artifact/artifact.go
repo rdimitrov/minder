@@ -213,12 +213,6 @@ func (i *Ingest) getApplicableArtifactVersions(
 }
 
 func getArtifactVersions(ctx context.Context, ghCli provifv1.GitHub, artifact *pb.Artifact) ([]*pb.ArtifactVersion, error) {
-	// if the artifact has versions, use them - this is processing a webhook request where it will
-	// be just one version
-	if artifact.Versions != nil {
-		return artifact.Versions, nil
-	}
-
 	// if we don't have the versions, get them all from the API
 	// now query for versions, retrieve the ones from last month
 	isOrg := (ghCli.GetOwner() != "")
