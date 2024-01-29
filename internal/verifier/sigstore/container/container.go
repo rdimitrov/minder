@@ -106,7 +106,14 @@ func Verify(
 		err = bundleFromGHAttenstationEndpoint(ctx, params, auth.ghClient, owner, version)
 	}
 
-	if err != nil {
+	if errors.Is(err, ErrOciImageSignatureNotFound) {
+		return &verifyif.Result{
+			IsSigned:         false,
+			IsVerified:       false,
+			IsBundleVerified: false,
+			URI:              buildImageRef(registry, owner, artifact, version),
+		}, nil
+	} else if err != nil {
 		return nil, err
 	}
 
@@ -201,6 +208,9 @@ func getAttestationReply(ctx context.Context, ghCli provifv1.GitHub, owner, vers
 
 	resp, err := ghCli.Do(ctx, req)
 	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: %s", ErrOciImageSignatureNotFound, err.Error())
+		}
 		return nil, fmt.Errorf("error doing request: %w", err)
 	}
 	defer resp.Body.Close()

@@ -159,18 +159,30 @@ func (i *Ingest) getApplicableArtifactVersions(
 			if err != nil {
 				return nil, err
 			}
-			versionResults = append(versionResults, verificationResult{
-				Verification: verification{
-					IsSigned:          res.IsSigned,
-					IsVerified:        res.IsVerified,
-					IsBundleVerified:  res.IsBundleVerified,
-					Repository:        res.Signature.Certificate.SourceRepositoryURI,
-					Branch:            branchFromRef(res.Signature.Certificate.SourceRepositoryRef),
-					WorkflowName:      workflowFromBuildSignerURI(res.Signature.Certificate.BuildSignerURI),
-					RunnerEnvironment: res.Signature.Certificate.RunnerEnvironment,
-					CertIssuer:        res.Signature.Certificate.Issuer,
-				},
-			})
+
+			// FIXME: ugly and hacky
+			if res.IsSigned {
+				versionResults = append(versionResults, verificationResult{
+					Verification: verification{
+						IsSigned:          res.IsSigned,
+						IsVerified:        res.IsVerified,
+						IsBundleVerified:  res.IsBundleVerified,
+						Repository:        res.Signature.Certificate.SourceRepositoryURI,
+						Branch:            branchFromRef(res.Signature.Certificate.SourceRepositoryRef),
+						WorkflowName:      workflowFromBuildSignerURI(res.Signature.Certificate.BuildSignerURI),
+						RunnerEnvironment: res.Signature.Certificate.RunnerEnvironment,
+						CertIssuer:        res.Signature.Certificate.Issuer,
+					},
+				})
+			} else {
+				versionResults = append(versionResults, verificationResult{
+					Verification: verification{
+						IsSigned:         res.IsSigned,
+						IsVerified:       res.IsVerified,
+						IsBundleVerified: res.IsBundleVerified,
+					},
+				})
+			}
 		}
 	}
 
