@@ -96,7 +96,7 @@ func Verify(
 ) (*verifyif.Result, error) {
 
 	// create a default verification result
-	params := newVerifyResult(buildImageRef(registry, owner, artifact, version))
+	params := newVerifyResult(BuildImageRef(registry, owner, artifact, version))
 
 	auth := newContainerAuth(authOpts...)
 
@@ -105,15 +105,14 @@ func Verify(
 	if errors.Is(err, ErrOciImageSignatureNotFound) || errors.Is(err, ErrAuthNotProvided) {
 		err = bundleFromGHAttenstationEndpoint(ctx, params, auth.ghClient, owner, version)
 	}
-
 	if errors.Is(err, ErrOciImageSignatureNotFound) {
-		return &verifyif.Result{
-			IsSigned:         false,
-			IsVerified:       false,
-			IsBundleVerified: false,
-			URI:              buildImageRef(registry, owner, artifact, version),
-		}, nil
+		// We've tried building a bundle from the OCI image/the GitHub attestation endpoint and failed
+		// This means there's no available provenance information about this image
+		// In this case, we return a nil result and no error
+		return nil, nil
 	} else if err != nil {
+		// We've tried building a bundle from the OCI image/the GitHub attestation endpoint and failed with an unexpected error
+		// In this case, we return the error
 		return nil, err
 	}
 
@@ -123,14 +122,17 @@ func Verify(
 		verify.WithCertificateIdentity(*params.certID),
 	))
 	if err != nil {
-		return nil, err
+		// This means the bundle we provided failed verification. In this case, we return a nil result and no error.
+		// The reason is that we want to tell whether we have verified provenance information or not.
+		// Apparently we don't have one we can trust, so we return a nil result and no error that translates to "no provenance information"
+		// In this case, we return a nil result and no error
+		return nil, nil
 	}
 
+	// We've successfully collected and verified the artifact provenance information
 	return &verifyif.Result{
 		IsSigned:           true,
 		IsVerified:         true,
-		IsBundleVerified:   true,
-		URI:                buildImageRef(registry, owner, artifact, version),
 		VerificationResult: *verificationResult,
 	}, nil
 }
@@ -591,8 +593,8 @@ func newGithubAuthenticator(username, password string) githubAuthenticator {
 	return githubAuthenticator{username, password}
 }
 
-// buildImageRef returns the OCI image reference
-func buildImageRef(registry, owner, artifact, version string) string {
+// BuildImageRef returns the OCI image reference
+func BuildImageRef(registry, owner, artifact, version string) string {
 	return fmt.Sprintf("%s/%s/%s@%s", registry, owner, artifact, version)
 }
 

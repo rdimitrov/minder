@@ -26,14 +26,12 @@ import (
 
 	"github.com/rs/zerolog"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	evalerrors "github.com/stacklok/minder/internal/engine/errors"
 	engif "github.com/stacklok/minder/internal/engine/interfaces"
 	"github.com/stacklok/minder/internal/providers"
 	"github.com/stacklok/minder/internal/verifier"
 	"github.com/stacklok/minder/internal/verifier/sigstore/container"
-	"github.com/stacklok/minder/internal/verifier/verifyif"
 	pb "github.com/stacklok/minder/pkg/api/protobuf/go/minder/v1"
 	provifv1 "github.com/stacklok/minder/pkg/providers/v1"
 )
@@ -52,7 +50,6 @@ type Ingest struct {
 type verification struct {
 	IsSigned          bool   `json:"is_signed"`
 	IsVerified        bool   `json:"is_verified"`
-	IsBundleVerified  bool   `json:"is_bundle_verified"`
 	Repository        string `json:"repository"`
 	Branch            string `json:"branch"`
 	WorkflowName      string `json:"workflow_name"`
@@ -110,6 +107,7 @@ func (i *Ingest) Ingest(
 	// Filter the versions of the artifact that are applicable to this rule
 	applicable, err := i.getApplicableArtifactVersions(ctx, artifact, cfg)
 	if err != nil {
+		// Take into consideration that the returned error is later wrapped in an error of type evalerrors
 		return nil, err
 	}
 
@@ -129,74 +127,34 @@ func (i *Ingest) getApplicableArtifactVersions(
 	artifact *pb.Artifact,
 	cfg *ingesterConfig,
 ) ([]map[string]any, error) {
-	// make sure the artifact type matches
+	// Make sure the artifact type matches
 	if newArtifactIngestType(artifact.Type) != cfg.Type {
 		return nil, evalerrors.NewErrEvaluationSkipSilently("artifact type mismatch")
 	}
 
-	// if a name is specified, make sure it matches
+	// If a name is specified, make sure it matches
 	if cfg.Name != "" && cfg.Name != artifact.Name {
 		return nil, evalerrors.NewErrEvaluationSkipSilently("artifact name mismatch")
 	}
 
-	// Build a tag matcher based on the configuration
-	tagMatcher, err := buildTagMatcher(cfg.Tags, cfg.TagRegex)
+	// Get all artifact versions filtering out those that don't apply to this rule
+	versions, err := getAndFilterArtifactVersions(ctx, cfg, i.ghCli, artifact)
 	if err != nil {
 		return nil, err
 	}
 
-	// get all versions of the artifact that are applicable to this rule
-	versions, err := getArtifactVersions(ctx, i.ghCli, artifact)
+	// Get the provenance info for all artifact versions that apply to this rule
+	verificationResults, err := getVerificationResult(ctx, cfg, i.ghCli, artifact, versions)
 	if err != nil {
 		return nil, err
 	}
 
-	versionResults := make([]verificationResult, 0, len(versions))
-	for _, artifactVersion := range versions {
-		if tagMatcher.MatchTag(artifactVersion.Tags...) {
-			res, err := getVerificationResult(
-				ctx, i.ghCli, artifact.Owner, artifact.Name, artifactVersion.Sha, cfg.Sigstore)
-			if err != nil {
-				return nil, err
-			}
-
-			// FIXME: ugly and hacky
-			if res.IsSigned {
-				versionResults = append(versionResults, verificationResult{
-					Verification: verification{
-						IsSigned:          res.IsSigned,
-						IsVerified:        res.IsVerified,
-						IsBundleVerified:  res.IsBundleVerified,
-						Repository:        res.Signature.Certificate.SourceRepositoryURI,
-						Branch:            branchFromRef(res.Signature.Certificate.SourceRepositoryRef),
-						WorkflowName:      workflowFromBuildSignerURI(res.Signature.Certificate.BuildSignerURI),
-						RunnerEnvironment: res.Signature.Certificate.RunnerEnvironment,
-						CertIssuer:        res.Signature.Certificate.Issuer,
-					},
-				})
-			} else {
-				versionResults = append(versionResults, verificationResult{
-					Verification: verification{
-						IsSigned:         res.IsSigned,
-						IsVerified:       res.IsVerified,
-						IsBundleVerified: res.IsBundleVerified,
-					},
-				})
-			}
-		}
-	}
-
-	// if no applicable artifact versions were found for this rule, we can go ahead and fail the rule evaluation here
-	if len(versionResults) == 0 {
-		return nil, evalerrors.NewErrEvaluationFailed("no applicable artifact versions found")
-	}
-
-	jsonBytes, err := json.Marshal(versionResults)
+	jsonBytes, err := json.Marshal(verificationResults)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]map[string]any, 0, len(versionResults))
+	result := make([]map[string]any, 0, len(verificationResults))
 	err = json.Unmarshal(jsonBytes, &result)
 	if err != nil {
 		return nil, err
@@ -208,65 +166,113 @@ func (i *Ingest) getApplicableArtifactVersions(
 		fmt.Println(string(prettyJSON))
 	}
 
-	// return the list of applicable artifact versions
+	// Return the list of provenance info for all applicable artifact versions
 	return result, nil
 }
 
-func getArtifactVersions(ctx context.Context, ghCli provifv1.GitHub, artifact *pb.Artifact) ([]*pb.ArtifactVersion, error) {
-	// if we don't have the versions, get them all from the API
-	// now query for versions, retrieve the ones from last month
+func getVerificationResult(
+	ctx context.Context,
+	cfg *ingesterConfig,
+	ghCli provifv1.GitHub,
+	artifact *pb.Artifact,
+	versions []string,
+) ([]verificationResult, error) {
+	versionResults := make([]verificationResult, 0, len(versions))
+	// Get the verifier for sigstore
+	artifactVerifier, err := verifier.NewVerifier(
+		verifier.VerifierSigstore,
+		cfg.Sigstore,
+		container.WithAccessToken(ghCli.GetToken()), container.WithGitHubClient(ghCli))
+	if err != nil {
+		return nil, fmt.Errorf("error getting sigstore verifier: %w", err)
+	}
+	defer artifactVerifier.ClearCache()
+
+	// Loop through all artifact versions that apply to this rule and get the provenance info for each
+	for _, artifactVersion := range versions {
+		verResult := &verification{}
+		// Try getting provenance info for the artifact version
+		res, err := artifactVerifier.Verify(ctx, verifier.ArtifactTypeContainer, "",
+			artifact.Owner, artifact.Name, artifactVersion)
+		if err != nil {
+			// We consider err != nil as a fatal error, so we'll fail the rule evaluation here
+			artifactName := container.BuildImageRef("", artifact.Owner, artifact.Name, artifactVersion)
+			zerolog.Ctx(ctx).Debug().Err(err).Str("name", artifactName).Msg("failed getting signature information")
+			return nil, fmt.Errorf("failed getting signature information: %w", err)
+		} else if res == nil {
+			// We consider err == nil && res == nil as a non-fatal error, so we'll append the empty verResult and continue
+			// Default values should be quite reasonable in this case
+			artifactName := container.BuildImageRef("", artifact.Owner, artifact.Name, artifactVersion)
+			zerolog.Ctx(ctx).Debug().Str("name", artifactName).Msg("no signature information found")
+		} else {
+			// res != nil && err == nil means we successfully got provenance info for the artifact version
+			verResult = &verification{
+				IsSigned:          res.IsSigned,
+				IsVerified:        res.IsVerified,
+				Repository:        res.Signature.Certificate.SourceRepositoryURI,
+				Branch:            branchFromRef(res.Signature.Certificate.SourceRepositoryRef),
+				WorkflowName:      workflowFromBuildSignerURI(res.Signature.Certificate.BuildSignerURI),
+				RunnerEnvironment: res.Signature.Certificate.RunnerEnvironment,
+				CertIssuer:        res.Signature.Certificate.Issuer,
+			}
+		}
+
+		// Append the verification result to the list
+		versionResults = append(versionResults, verificationResult{
+			Verification: *verResult,
+		})
+	}
+
+	return versionResults, nil
+}
+
+func getAndFilterArtifactVersions(
+	ctx context.Context,
+	cfg *ingesterConfig,
+	ghCli provifv1.GitHub,
+	artifact *pb.Artifact,
+) ([]string, error) {
+	var res []string
+
+	// Build a tag filter based on the configuration
+	filter, err := buildTagMatcher(cfg.Tags, cfg.TagRegex)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch all available versions of the artifact
 	isOrg := (ghCli.GetOwner() != "")
 	upstreamVersions, err := ghCli.GetPackageVersions(ctx, isOrg, artifact.Owner, artifact.GetTypeLower(), artifact.GetName())
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving artifact versions: %w", err)
 	}
 
-	pbVersions := make([]*pb.ArtifactVersion, 0, len(upstreamVersions))
+	// Loop through all and filter out the versions that don't apply to this rule
 	for _, version := range upstreamVersions {
 		tags := version.Metadata.Container.Tags
 		sort.Strings(tags)
 
-		err = isSkippable(verifier.ArtifactTypeContainer, version.CreatedAt.Time, map[string]interface{}{"tags": tags})
+		// Decide if the artifact version should be skipped or not
+		err = isSkippable(verifier.ArtifactTypeContainer, version.CreatedAt.Time, map[string]interface{}{"tags": tags}, filter)
 		if err != nil {
-			zerolog.Ctx(ctx).Debug().Str("reason", err.Error()).Strs("tags", tags).Msg("skipping artifact version")
+			zerolog.Ctx(ctx).Debug().Str("name", *version.Name).Strs("tags", tags).Str(
+				"reason",
+				err.Error(),
+			).Msg("skipping artifact version")
 			continue
 		}
 
-		pbVersions = append(pbVersions, &pb.ArtifactVersion{
-			VersionId: 0, // FIXME: this is a DB PK. Will be removed in a later commit
-			Tags:      tags,
-			Sha:       *version.Name,
-			CreatedAt: timestamppb.New(version.CreatedAt.Time),
-		})
+		// If the artifact version is applicable to this rule, add it to the list
+		zerolog.Ctx(ctx).Debug().Str("name", *version.Name).Strs("tags", tags).Msg("artifact version matched")
+		res = append(res, *version.Name)
 	}
 
-	return pbVersions, nil
-}
-
-func getVerificationResult(
-	ctx context.Context,
-	client provifv1.GitHub,
-	artifactOwnerLogin, artifactName, sha, sigstoreURL string,
-) (*verifyif.Result, error) {
-	// get the verifier for sigstore
-	artifactVerifier, err := verifier.NewVerifier(
-		verifier.VerifierSigstore,
-		sigstoreURL,
-		container.WithAccessToken(client.GetToken()), container.WithGitHubClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("error getting sigstore verifier: %w", err)
-	}
-	defer artifactVerifier.ClearCache()
-
-	// now get information for signature and workflow
-	res, err := artifactVerifier.Verify(ctx, verifier.ArtifactTypeContainer, "",
-		artifactOwnerLogin, artifactName, sha)
-	if err != nil {
-		// FIXME: safer to return a special error here and catch it in the caller
-		zerolog.Ctx(ctx).Debug().Err(err).Str("URI", res.GetUri()).Msg("no signature information found")
-		return nil, err
+	// If no applicable artifact versions were found for this rule, we can go ahead and fail the rule evaluation here
+	if len(res) == 0 {
+		return nil, evalerrors.NewErrEvaluationFailed("no applicable artifact versions found")
 	}
 
+	// Return the list of applicable artifact versions, i.e. []string{"digest1", "digest2", ...}
 	return res, nil
 }
 
@@ -277,7 +283,7 @@ var (
 
 // isSkippable determines if an artifact should be skipped
 // TODO - this should be refactored as well, for now just a forklift from reconciler
-func isSkippable(artifactType verifier.ArtifactType, createdAt time.Time, opts map[string]interface{}) error {
+func isSkippable(artifactType verifier.ArtifactType, createdAt time.Time, opts map[string]interface{}, filter tagMatcher) error {
 	switch artifactType {
 	case verifier.ArtifactTypeContainer:
 		// if the artifact is older than the retention period, skip it
@@ -294,6 +300,10 @@ func isSkippable(artifactType verifier.ArtifactType, createdAt time.Time, opts m
 		// if the artifact has a .sig tag it's a signature, skip it
 		if verifier.GetSignatureTag(tags) != "" {
 			return fmt.Errorf("artifact is a signature")
+		}
+		// if the artifact tags don't match the tag matcher, skip it
+		if !filter.MatchTag(tags...) {
+			return fmt.Errorf("artifact tags does not match")
 		}
 		return nil
 	default:
