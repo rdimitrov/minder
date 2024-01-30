@@ -190,7 +190,6 @@ func getVerificationResult(
 
 	// Loop through all artifact versions that apply to this rule and get the provenance info for each
 	for _, artifactVersion := range versions {
-		verResult := &verification{}
 		// Try getting provenance info for the artifact version
 		res, err := artifactVerifier.Verify(ctx, verifier.ArtifactTypeContainer, "",
 			artifact.Owner, artifact.Name, artifactVersion)
@@ -199,22 +198,27 @@ func getVerificationResult(
 			artifactName := container.BuildImageRef("", artifact.Owner, artifact.Name, artifactVersion)
 			zerolog.Ctx(ctx).Debug().Err(err).Str("name", artifactName).Msg("failed getting signature information")
 			return nil, fmt.Errorf("failed getting signature information: %w", err)
-		} else if res == nil {
-			// We consider err == nil && res == nil as a non-fatal error, so we'll append the empty verResult and continue
-			// Default values should be quite reasonable in this case
+		}
+
+		// Log a debug message in case we failed to find or verify any signature information for the artifact version
+		if !res.IsSigned || !res.IsVerified {
 			artifactName := container.BuildImageRef("", artifact.Owner, artifact.Name, artifactVersion)
-			zerolog.Ctx(ctx).Debug().Str("name", artifactName).Msg("no signature information found")
-		} else {
-			// res != nil && err == nil means we successfully got provenance info for the artifact version
-			verResult = &verification{
-				IsSigned:          res.IsSigned,
-				IsVerified:        res.IsVerified,
-				Repository:        res.Signature.Certificate.SourceRepositoryURI,
-				Branch:            branchFromRef(res.Signature.Certificate.SourceRepositoryRef),
-				WorkflowName:      workflowFromBuildSignerURI(res.Signature.Certificate.BuildSignerURI),
-				RunnerEnvironment: res.Signature.Certificate.RunnerEnvironment,
-				CertIssuer:        res.Signature.Certificate.Issuer,
-			}
+			zerolog.Ctx(ctx).Debug().Str("name", artifactName).Msg("failed to find or verify signature information")
+		}
+
+		// Begin building the verification result
+		verResult := &verification{
+			IsSigned:   res.IsSigned,
+			IsVerified: res.IsVerified,
+		}
+
+		// If we got verified provenance info for the artifact version, populate the rest of the verification result
+		if res.IsVerified {
+			verResult.Repository = res.Signature.Certificate.SourceRepositoryURI
+			verResult.Branch = branchFromRef(res.Signature.Certificate.SourceRepositoryRef)
+			verResult.WorkflowName = workflowFromBuildSignerURI(res.Signature.Certificate.BuildSignerURI)
+			verResult.RunnerEnvironment = res.Signature.Certificate.RunnerEnvironment
+			verResult.CertIssuer = res.Signature.Certificate.Issuer
 		}
 
 		// Append the verification result to the list
