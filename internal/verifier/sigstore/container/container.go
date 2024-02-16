@@ -183,11 +183,12 @@ func getSigstoreBundles(
 	auth *containerAuth,
 ) ([]sigstoreBundle, error) {
 	imageRef := BuildImageRef(registry, owner, artifact, version)
+
 	// Try to build a bundle from the OCI image reference
-	bundles, err := bundleFromOCIImage(ctx, imageRef, newGithubAuthenticator(owner, auth.accessToken))
+	bundles, err := bundlesFromOCIImage(ctx, imageRef, newGithubAuthenticator(owner, auth.accessToken))
 	if errors.Is(err, ErrProvenanceNotFoundOrIncomplete) || errors.Is(err, ErrAuthNotProvided) {
 		// If we failed to find the signature in the OCI image, try to build a bundle from the GitHub attestation endpoint
-		return bundleFromGHAttestationEndpoint(ctx, auth.ghClient, owner, version)
+		return bundlesFromGHAttestationEndpoint(ctx, auth.ghClient, owner, version)
 	}
 	// We either got an unexpected error or successfully built a bundle from the OCI image
 	return bundles, nil
@@ -203,7 +204,7 @@ type AttestationReply struct {
 	Attestations []Attestation `json:"attestations"`
 }
 
-func bundleFromGHAttestationEndpoint(
+func bundlesFromGHAttestationEndpoint(
 	ctx context.Context, ghCli provifv1.GitHub, owner, version string,
 ) ([]sigstoreBundle, error) {
 	logger := zerolog.Ctx(ctx)
@@ -337,8 +338,8 @@ func getDigestFromVersion(version string) ([]byte, error) {
 	return digest, nil
 }
 
-// bundleFromOCIImage returns a ProtobufBundle based on OCI image reference.
-func bundleFromOCIImage(ctx context.Context,
+// bundlesFromOCIImage returns a ProtobufBundle based on OCI image reference.
+func bundlesFromOCIImage(ctx context.Context,
 	imageRef string, auth githubAuthenticator) ([]sigstoreBundle, error) {
 	logger := zerolog.Ctx(ctx)
 
@@ -518,19 +519,20 @@ func getSimpleSigningLayersFromSignatureManifest(ctx context.Context,
 }
 
 // getBundleVerificationMaterial returns the bundle verification material from the simple signing layer
-func getBundleVerificationMaterial(manifestLayer v1.Descriptor) (
-	*protobundle.VerificationMaterial, error) {
-	// 1. Get the signing certificate chain
+func getBundleVerificationMaterial(manifestLayer v1.Descriptor) (*protobundle.VerificationMaterial, error) {
+	// Get the signing certificate chain - empty if there's no certificate in the simplesigning layer
 	signingCert, err := getVerificationMaterialX509CertificateChain(manifestLayer)
 	if err != nil {
 		return nil, fmt.Errorf("error getting signing certificate: %w", err)
 	}
-	// 2. Get the transparency log entries
+
+	// Get the transparency log entries
 	tlogEntries, err := getVerificationMaterialTlogEntries(manifestLayer)
 	if err != nil {
 		return nil, fmt.Errorf("error getting tlog entries: %w", err)
 	}
-	// 3. Construct the verification material
+
+	// Construct the verification material
 	return &protobundle.VerificationMaterial{
 		Content:                   signingCert,
 		TlogEntries:               tlogEntries,
@@ -542,17 +544,26 @@ func getBundleVerificationMaterial(manifestLayer v1.Descriptor) (
 // simple signing layer
 func getVerificationMaterialX509CertificateChain(manifestLayer v1.Descriptor) (
 	*protobundle.VerificationMaterial_X509CertificateChain, error) {
-	// 1. Get the PEM certificate from the simple signing layer
-	pemCert := manifestLayer.Annotations["dev.sigstore.cosign/certificate"]
-	// 2. Construct the DER encoded version of the PEM certificate
-	block, _ := pem.Decode([]byte(pemCert))
-	if block == nil {
-		return nil, errors.New("failed to decode PEM block")
+	var signingCert protocommon.X509Certificate
+
+	// Check if there's a certificate in the simple signing layer
+	pemCert, ok := manifestLayer.Annotations["dev.sigstore.cosign/certificate"]
+	if ok {
+		// If there's one, construct the DER encoded version of the PEM certificate
+		block, err := pem.Decode([]byte(pemCert))
+		if block == nil || err != nil {
+			return nil, errors.New("failed to decode PEM block")
+		}
+		signingCert = protocommon.X509Certificate{
+			RawBytes: block.Bytes,
+		}
+	} else {
+		// Signing using a key-pair is a valid signature method that has no certificate.
+		// In this case, we'll return an empty VerificationMaterial_X509CertificateChain{}
+		signingCert = protocommon.X509Certificate{}
 	}
-	signingCert := protocommon.X509Certificate{
-		RawBytes: block.Bytes,
-	}
-	// 3. Construct the X509 certificate chain
+
+	// Construct the X509 certificate chain
 	return &protobundle.VerificationMaterial_X509CertificateChain{
 		X509CertificateChain: &protocommon.X509CertificateChain{
 			Certificates: []*protocommon.X509Certificate{&signingCert},
@@ -563,14 +574,15 @@ func getVerificationMaterialX509CertificateChain(manifestLayer v1.Descriptor) (
 // getVerificationMaterialTlogEntries returns the verification material transparency log entries from the simple signing layer
 func getVerificationMaterialTlogEntries(manifestLayer v1.Descriptor) (
 	[]*protorekor.TransparencyLogEntry, error) {
-	// 1. Get the bundle annotation
+	// Get the bundle annotation
 	bun := manifestLayer.Annotations["dev.sigstore.cosign/bundle"]
 	var jsonData map[string]interface{}
 	err := json.Unmarshal([]byte(bun), &jsonData)
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling json: %w", err)
 	}
-	// 2. Get the log index, log ID, integrated time, signed entry timestamp and body
+
+	// Get the log index, log ID, integrated time, signed entry timestamp and body
 	logIndex, ok := jsonData["Payload"].(map[string]interface{})["logIndex"].(float64)
 	if !ok {
 		return nil, fmt.Errorf("error getting logIndex")
@@ -596,7 +608,8 @@ func getVerificationMaterialTlogEntries(manifestLayer v1.Descriptor) (
 	if err != nil {
 		return nil, fmt.Errorf("error decoding signedEntryTimestamp: %w", err)
 	}
-	// 3. Unmarshal the body and extract the rekor KindVersion details
+
+	// Unmarshal the body and extract the rekor KindVersion details
 	body, ok := jsonData["Payload"].(map[string]interface{})["body"].(string)
 	if !ok {
 		return nil, fmt.Errorf("error getting body")
@@ -611,7 +624,8 @@ func getVerificationMaterialTlogEntries(manifestLayer v1.Descriptor) (
 	}
 	apiVersion := jsonData["apiVersion"].(string)
 	kind := jsonData["kind"].(string)
-	// 4. Construct the transparency log entry list
+
+	// Construct the transparency log entry list
 	return []*protorekor.TransparencyLogEntry{
 		{
 			LogIndex: logIndexInt64,
@@ -634,7 +648,7 @@ func getVerificationMaterialTlogEntries(manifestLayer v1.Descriptor) (
 
 // getBundleMsgSignature returns the bundle message signature from the simple signing layer
 func getBundleMsgSignature(simpleSigningLayer v1.Descriptor) (*protobundle.Bundle_MessageSignature, error) {
-	// 1. Get the message digest algorithm
+	// Get the message digest algorithm
 	var msgHashAlg protocommon.HashAlgorithm
 	switch simpleSigningLayer.Digest.Algorithm {
 	case "sha256":
@@ -642,17 +656,19 @@ func getBundleMsgSignature(simpleSigningLayer v1.Descriptor) (*protobundle.Bundl
 	default:
 		return nil, fmt.Errorf("unknown digest algorithm: %s", simpleSigningLayer.Digest.Algorithm)
 	}
-	// 2. Get the message digest
+	// Get the message digest
 	digest, err := hex.DecodeString(simpleSigningLayer.Digest.Hex)
 	if err != nil {
 		return nil, fmt.Errorf("error decoding digest: %w", err)
 	}
-	// 3. Get the signature
+
+	// Get the signature
 	s := simpleSigningLayer.Annotations["dev.cosignproject.cosign/signature"]
 	sig, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
 		return nil, fmt.Errorf("error decoding manSig: %w", err)
 	}
+
 	// Construct the bundle message signature
 	return &protobundle.Bundle_MessageSignature{
 		MessageSignature: &protocommon.MessageSignature{
