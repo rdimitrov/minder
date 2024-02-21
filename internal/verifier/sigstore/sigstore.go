@@ -17,13 +17,19 @@ package sigstore
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/x509"
 	"embed"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/sigstore/sigstore/pkg/signature"
 	"io/fs"
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/sigstore/sigstore-go/pkg/root"
@@ -57,8 +63,28 @@ type Sigstore struct {
 
 var _ verifyif.ArtifactVerifier = (*Sigstore)(nil)
 
+type nonExpiringVerifier struct {
+	signature.Verifier
+}
+
+func (*nonExpiringVerifier) ValidAtTime(_ time.Time) bool {
+	return true
+}
+
+func trustedPublicKeyMaterial(pk crypto.PublicKey) *root.TrustedPublicKeyMaterial {
+	return root.NewTrustedPublicKeyMaterial(func(string) (root.TimeConstrainedVerifier, error) {
+		verifier, err := signature.LoadECDSAVerifier(pk.(*ecdsa.PublicKey), crypto.SHA256)
+		if err != nil {
+			return nil, err
+		}
+		return &nonExpiringVerifier{verifier}, nil
+	})
+}
+
 // New creates a new Sigstore verifier
 func New(trustedRoot string, authOpts ...container.AuthMethod) (*Sigstore, error) {
+	var trustedMaterial = make(root.TrustedMaterialCollection, 0)
+
 	cacheDir, err := createTmpDir(LocalCacheDir, "sigstore")
 	if err != nil {
 		return nil, err
@@ -75,7 +101,7 @@ func New(trustedRoot string, authOpts ...container.AuthMethod) (*Sigstore, error
 		return nil, err
 	}
 
-	trustedMaterial, err := root.NewTrustedRootFromJSON(trustedrootJSON)
+	tm, err := root.NewTrustedRootFromJSON(trustedrootJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +110,18 @@ func New(trustedRoot string, authOpts ...container.AuthMethod) (*Sigstore, error
 	if err != nil {
 		return nil, err
 	}
+
+	pk := "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEP+J3PNq/q25pWbBghdbEHScPWyut\nmdNiUuLG/yEqDI6SdHLJwqZ0KMh/NKkjbye/w0wgNSWLjX0777IiAYAwKA==\n-----END PUBLIC KEY-----"
+	pemBlock, _ := pem.Decode([]byte(pk))
+	if pemBlock == nil {
+		return nil, fmt.Errorf("error decoding public key")
+	}
+	pubKey, err := x509.ParsePKIXPublicKey(pemBlock.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing public key: %w", err)
+	}
+	trustedMaterial = append(trustedMaterial, tm)
+	trustedMaterial = append(trustedMaterial, trustedPublicKeyMaterial(pubKey))
 
 	sev, err := verify.NewSignedEntityVerifier(trustedMaterial, opts...)
 	if err != nil {

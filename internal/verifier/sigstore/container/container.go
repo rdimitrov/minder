@@ -26,9 +26,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"net/http"
-	"strings"
-
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -43,6 +40,8 @@ import (
 	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/sigstore/sigstore-go/pkg/verify"
 	"google.golang.org/protobuf/encoding/protojson"
+	"net/http"
+	"strings"
 
 	"github.com/stacklok/minder/internal/verifier/verifyif"
 	provifv1 "github.com/stacklok/minder/pkg/providers/v1"
@@ -140,13 +139,25 @@ func getVerifiedResults(
 			IsSigned:   false,
 			IsVerified: false,
 		}
-
 		// Get the certificate identity
 		certID, err := verify.NewShortCertificateIdentity(b.certIssuer, "", "", b.certIdentity)
 		if err != nil {
 			// Log the error and continue to the next bundle, this one is considered signed but not verified
 			logger.Err(err).Msg("error getting certificate identity")
 			results = append(results, res)
+			// ---------
+			verificationResult, err := sev.Verify(b.bundle, verify.NewPolicy(
+				verify.WithArtifactDigest(b.digestAlgo, b.digestBytes),
+				//verify.WithoutIdentitiesUnsafe(),
+			))
+			verificationResult = verificationResult
+			if err != nil {
+				// The bundle we provided failed verification
+				// Log the error and continue to the next bundle, this one is considered signed but not verified
+				logger.Err(err).Msg("error verifying bundle")
+				results = append(results, res)
+				continue
+			}
 			continue
 		}
 
@@ -525,13 +536,22 @@ func getBundleVerificationMaterial(manifestLayer v1.Descriptor) (*protobundle.Ve
 	if err != nil {
 		return nil, fmt.Errorf("error getting signing certificate: %w", err)
 	}
-
 	// Get the transparency log entries
 	tlogEntries, err := getVerificationMaterialTlogEntries(manifestLayer)
 	if err != nil {
 		return nil, fmt.Errorf("error getting tlog entries: %w", err)
 	}
-
+	if signingCert == nil {
+		return &protobundle.VerificationMaterial{
+			Content: &protobundle.VerificationMaterial_PublicKey{
+				&protocommon.PublicKeyIdentifier{
+					Hint: "test",
+				},
+			},
+			TlogEntries:               tlogEntries,
+			TimestampVerificationData: nil,
+		}, nil
+	}
 	// Construct the verification material
 	return &protobundle.VerificationMaterial{
 		Content:                   signingCert,
@@ -550,8 +570,8 @@ func getVerificationMaterialX509CertificateChain(manifestLayer v1.Descriptor) (
 	pemCert, ok := manifestLayer.Annotations["dev.sigstore.cosign/certificate"]
 	if ok {
 		// If there's one, construct the DER encoded version of the PEM certificate
-		block, err := pem.Decode([]byte(pemCert))
-		if block == nil || err != nil {
+		block, _ := pem.Decode([]byte(pemCert))
+		if block == nil { // || block.Type != "CERTIFICATE" {
 			return nil, errors.New("failed to decode PEM block")
 		}
 		signingCert = protocommon.X509Certificate{
@@ -560,7 +580,9 @@ func getVerificationMaterialX509CertificateChain(manifestLayer v1.Descriptor) (
 	} else {
 		// Signing using a key-pair is a valid signature method that has no certificate.
 		// In this case, we'll return an empty VerificationMaterial_X509CertificateChain{}
-		signingCert = protocommon.X509Certificate{}
+		// signingCert = protocommon.X509Certificate{}
+		// Construct the X509 certificate chain
+		return nil, nil
 	}
 
 	// Construct the X509 certificate chain
